@@ -197,70 +197,16 @@ class VoiceInput extends EventEmitter {
   }
 
   async _whisper(wavPath, prompt = 'Computer science, programming, algorithms, data structures, binary tree, linked list, recursion, Python, JavaScript') {
-    const awsKey    = process.env.AWS_ACCESS_KEY_ID;
     const groqKey   = process.env.GROQ_KEY;
     const openaiKey = process.env.OPENAI_KEY;
 
-    // AWS Transcribe is primary when credentials are present
-    if (awsKey) {
-      try {
-        return await this._transcribeAWS(wavPath);
-      } catch (err) {
-        console.warn('[VOICE-IN] AWS Transcribe failed, falling back:', err.message);
-      }
-    }
     if (groqKey) {
       return this._whisperRequest(wavPath, prompt, groqKey, 'whisper-large-v3', GROQ_WHISPER_URL, 'Groq');
     }
     if (openaiKey) {
       return this._whisperRequest(wavPath, prompt, openaiKey, 'whisper-1', OPENAI_WHISPER_URL, 'OpenAI');
     }
-    throw new Error('No STT key set — add AWS, OPENAI_KEY or GROQ_KEY to your .env');
-  }
-
-  async _transcribeAWS(wavPath) {
-    const { TranscribeStreamingClient, StartStreamTranscriptionCommand } = require('@aws-sdk/client-transcribe-streaming');
-
-    const client = new TranscribeStreamingClient({
-      region: process.env.AWS_REGION || 'us-east-1',
-      credentials: {
-        accessKeyId:     process.env.AWS_ACCESS_KEY_ID,
-        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-      },
-    });
-
-    // Read the WAV file and strip the 44-byte header to get raw PCM
-    const wavBuf = fs.readFileSync(wavPath);
-    const pcm    = wavBuf.slice(44);
-
-    // Split PCM into chunks and create an async generator
-    const CHUNK_SIZE = 8192;
-    async function* audioStream() {
-      for (let offset = 0; offset < pcm.length; offset += CHUNK_SIZE) {
-        yield { AudioEvent: { AudioChunk: pcm.slice(offset, offset + CHUNK_SIZE) } };
-      }
-    }
-
-    const cmd = new StartStreamTranscriptionCommand({
-      LanguageCode:         'en-US',
-      MediaEncoding:        'pcm',
-      MediaSampleRateHertz: 16000,
-      AudioStream:          audioStream(),
-    });
-
-    const res = await client.send(cmd);
-    let transcript = '';
-
-    for await (const event of res.TranscriptResultStream) {
-      const results = event?.TranscriptEvent?.Transcript?.Results || [];
-      for (const result of results) {
-        if (!result.IsPartial && result.Alternatives?.[0]?.Transcript) {
-          transcript += result.Alternatives[0].Transcript + ' ';
-        }
-      }
-    }
-
-    return transcript.trim();
+    throw new Error('No STT key set — add GROQ_KEY or OPENAI_KEY to your .env');
   }
 
   async _whisperRequest(wavPath, prompt, key, model, url, provider) {

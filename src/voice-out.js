@@ -15,9 +15,10 @@ function setIpc(sendFn, onFn) { _ipcSend = sendFn; _ipcOn = onFn; }
 
 class VoiceOut {
   constructor() {
-    this._speaking    = false;
-    this._currentProc = null; // active child_process for playback or SAPI
-    this._sapiProc    = null; // active SAPI powershell process
+    this._speaking      = false;
+    this._currentProc   = null;
+    this._sapiProc      = null;
+    this._elQuotaDead   = false; // true once ElevenLabs returns quota_exceeded
   }
 
   // ── Public ─────────────────────────────────────────────────────────────────
@@ -45,7 +46,7 @@ class VoiceOut {
       const key      = process.env.ELEVENLABS_KEY;
       const voiceId  = process.env.ELEVENLABS_VOICE_ID;
 
-      if (key && voiceId) {
+      if (key && voiceId && !this._elQuotaDead) {
         try {
           await this._speakElevenLabs(text, key, voiceId, onAmplitude);
           return;

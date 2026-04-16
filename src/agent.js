@@ -7,7 +7,7 @@ const toolsModule      = require('./tools');
 const { TOOL_DEFINITIONS, readFile, writeFile, runCode, webSearch, openApp, openInVSCode, listDirectory,
         rememberFact, forgetFact, recallMemory,
         readClipboard, writeClipboard, setReminder, listMyFiles, captureScreen,
-        browserNavigate, browserAction } = toolsModule;
+        browserNavigate, browserAction, githubCli } = toolsModule;
 const DESKTOP_PATH     = toolsModule._DESKTOP_PATH;
 const { formatMemoryForPrompt } = require('./memory');
 const sessionLog = require('./session-log');
@@ -16,7 +16,7 @@ const sessionLog = require('./session-log');
 const TOOLS = { readFile, writeFile, runCode, webSearch, openApp, openInVSCode, listDirectory,
                 rememberFact, forgetFact, recallMemory,
                 readClipboard, writeClipboard, setReminder, listMyFiles, captureScreen,
-                browserNavigate, browserAction };
+                browserNavigate, browserAction, githubCli };
 
 // Explicit parameter order per tool — LLM may return args in any key order.
 const TOOL_PARAM_ORDER = {
@@ -37,6 +37,7 @@ const TOOL_PARAM_ORDER = {
   captureScreen:    ['question'],
   browserNavigate:  ['url'],
   browserAction:    ['action', 'selector', 'value'],
+  githubCli:        ['subcommand'],
 };
 
 const MAX_TOOL_LOOPS = 6; // safety cap on chained tool calls per turn
@@ -51,20 +52,23 @@ const MAX_HISTORY  = 4;
 // ─── System prompt ────────────────────────────────────────────────────────────
 const BASE_SYSTEM_PROMPT = `You are Trixie, a witty AI assistant on a student's Windows desktop.
 Speak concisely — no markdown, no bullet points, natural sentences only.
-You have tools: readFile, writeFile, runCode, webSearch, openApp, listDirectory, captureScreen, readClipboard, writeClipboard, setReminder, rememberFact, forgetFact, recallMemory, listMyFiles.
+You have tools: readFile, writeFile, runCode, webSearch, openApp, listDirectory, captureScreen, readClipboard, writeClipboard, setReminder, rememberFact, forgetFact, recallMemory, listMyFiles, browserNavigate, browserAction, githubCli.
+
+CRITICAL RULE — TOOL-FIRST: For ANY request that involves an action (opening, launching, searching, writing, reading, navigating, clicking), you MUST call the appropriate tool BEFORE generating a text response. It is strictly forbidden to claim you have done something without first calling the tool. If you say "I've opened X" or "I've saved X" without having called a tool in this turn, that is a hallucination and an error.
 
 Key behaviours:
 - "start viva on X" / "quiz me on X": become a strict professor, ask 4-5 questions one at a time, then score out of 10 and name weak areas.
-- "explain code" / "explain [file]": use readFile first, then teach conversationally.
-- "summarise my notes" / "cheat sheet for X": read files, write summary to Desktop as [topic]-cheatsheet.md.
-- "explain my screen" / "what's on my screen": call captureScreen.
-- "explain what I copied": call readClipboard.
-- "remind me to X in Y minutes": call setReminder.
-- "remember that X": call rememberFact. "forget X": call forgetFact.
-- "what files have you made": call listMyFiles.
-- "open X" / "go to X" / any website: ALWAYS call browserNavigate with the site name (e.g. "youtube", "gmail", "github", "netflix", "reddit", "chatgpt"). It opens Chrome automatically.
-- "search for X on [site]" / "click X" / "type X": use browserAction after browserNavigate.
-- "launch X" / "open [desktop app]": use openApp for non-browser apps (camera, calculator, spotify, discord, etc.). Never just say you opened something — always call the tool first.
+- "explain code" / "explain [file]": CALL readFile first, then teach conversationally.
+- "summarise my notes" / "cheat sheet for X": CALL readFile, then CALL writeFile to Desktop as [topic]-cheatsheet.md.
+- "explain my screen" / "what's on my screen": CALL captureScreen.
+- "explain what I copied": CALL readClipboard.
+- "remind me to X in Y minutes": CALL setReminder.
+- "remember that X": CALL rememberFact. "forget X": CALL forgetFact.
+- "what files have you made": CALL listMyFiles.
+- "open X" / "go to X" / any website: CALL browserNavigate with the site name (e.g. "youtube", "gmail", "github", "netflix", "reddit", "chatgpt").
+- "search for X on [site]" / "click X" / "type X": CALL browserAction after browserNavigate.
+- "open camera" / "open calculator" / "launch [app]" / any desktop app: CALL openApp immediately. Camera → openApp("camera"). Calculator → openApp("calculator"). Spotify → openApp("spotify"). Discord → openApp("discord"). Do not say you opened it — call the tool first, then confirm.
+- GitHub questions ("my repos", "latest repo", "what did I commit", "open my repo", "my PRs", "my issues", "did CI pass"): CALL githubCli. Examples: "repo list --limit 5", "commit list --repo OWNER/REPO --limit 10", "browse --repo OWNER/REPO". If the user doesn't specify a repo, call "repo list --limit 5" first to find it.
 Always be brief. Offer to write long answers to a file.
 
 IMPORTANT: The user's Desktop is at "${DESKTOP_PATH}". Always use this exact path when saving files to the Desktop. Never use ~, C:\\Users\\User, or any other guessed path.
@@ -226,7 +230,7 @@ class Agent {
       },
     });
 
-    const modelId = 'us.anthropic.claude-3-haiku-20240307-v1:0';
+    const modelId = 'us.anthropic.claude-haiku-4-5-20251001-v1:0';
 
     // Convert TOOL_DEFINITIONS to Bedrock tool format
     const bedrockTools = TOOL_DEFINITIONS.map(t => ({
@@ -286,6 +290,10 @@ class Agent {
       return text;
     }
 
+    // All iterations used tool calls — return whatever the last tool result was
+    const lastUserMsg = messages[messages.length - 1];
+    const lastResult  = lastUserMsg?.content?.find?.(b => b.toolResult)?.toolResult?.content?.[0]?.text;
+    if (lastResult) return lastResult;
     throw new Error('Bedrock tool loop exceeded max iterations');
   }
 
@@ -351,7 +359,7 @@ class Agent {
     // Send a reduced tool set to Groq to stay under the 6k TPM free limit.
     // Tools are grouped: core (always sent) + extras (sent only when keywords match).
     const lastMsg = this.conversationHistory[this.conversationHistory.length - 1]?.content?.toLowerCase() || '';
-    const needsExtras = /viva|quiz|remind|clipboard|screen|capture|memory|remember|forget|session|cheat sheet|report|my files/i.test(lastMsg);
+    const needsExtras = /viva|quiz|remind|clipboard|screen|capture|memory|remember|forget|session|cheat sheet|report|my files|github|repo|commit|pull request|issue|pr|ci/i.test(lastMsg);
     const toolsToSend = needsExtras
       ? toOpenAITools(TOOL_DEFINITIONS)
       : toOpenAITools(TOOL_DEFINITIONS.filter(t =>
@@ -463,6 +471,7 @@ class Agent {
       setReminder:    ()  => 'setting reminder\u2026',
       rememberFact:   ()  => 'saving to memory\u2026',
       forgetFact:     ()  => 'forgetting\u2026',
+      githubCli:      ()  => 'checking GitHub\u2026',
     };
     const fn = labels[name];
     return fn ? fn(args) : 'using ' + name + '\u2026';

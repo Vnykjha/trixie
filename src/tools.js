@@ -707,6 +707,79 @@ TOOL_DEFINITIONS.push({
   },
 });
 
+// ─── Tool 16: githubCli ───────────────────────────────────────────────────────
+// Runs safe, read-only (and open-in-browser) gh CLI subcommands.
+// Write/destructive commands are blocked by allowlist.
+
+const GH_ALLOWED = new Set([
+  'repo list', 'repo view', 'pr list', 'pr view', 'pr status',
+  'issue list', 'issue view', 'commit list', 'run list', 'run view',
+  'release list', 'release view', 'browse',
+]);
+
+function _ghAllowed(subcommand) {
+  // subcommand is e.g. "repo list", "pr list --limit 5", "browse"
+  const base = subcommand.trim().split(/\s+/).slice(0, 2).join(' ');
+  const baseSingle = subcommand.trim().split(/\s+/)[0];
+  return GH_ALLOWED.has(base) || GH_ALLOWED.has(baseSingle);
+}
+
+async function githubCli(subcommand) {
+  // Check gh is installed
+  const ghAvailable = await new Promise(resolve => {
+    exec('gh --version', { shell: true }, (err) => resolve(!err));
+  });
+  if (!ghAvailable) {
+    return 'GitHub CLI (gh) is not installed. Download it from https://cli.github.com and run "gh auth login".';
+  }
+
+  if (!_ghAllowed(subcommand)) {
+    return `Command "gh ${subcommand}" is not permitted — only read/browse commands are allowed.`;
+  }
+
+  return new Promise(resolve => {
+    exec(`gh ${subcommand}`, { shell: true, timeout: 15000 }, (err, stdout, stderr) => {
+      const out = (stdout || '').trim();
+      const errOut = (stderr || '').trim();
+      if (err && !out) {
+        // Common: not authenticated
+        if (errOut.includes('auth') || errOut.includes('login')) {
+          resolve('Not authenticated with GitHub. Run "gh auth login" in a terminal first.');
+        } else {
+          resolve(`gh error: ${errOut || err.message}`);
+        }
+        return;
+      }
+      const result = out || errOut;
+      resolve(result.length > 3000 ? result.slice(0, 3000) + '\n(truncated)' : result);
+    });
+  });
+}
+
+TOOL_DEFINITIONS.push({
+  name:        'githubCli',
+  description: `Run a GitHub CLI command to answer questions about the user's repos, PRs, commits, issues, and releases.
+Examples of subcommands to pass:
+- "repo list --limit 5" → list recent repos
+- "repo view OWNER/REPO" → repo details
+- "commit list --repo OWNER/REPO --limit 10" → recent commits
+- "pr list --repo OWNER/REPO" → open pull requests
+- "issue list --repo OWNER/REPO" → open issues
+- "browse --repo OWNER/REPO" → open repo in browser
+- "run list --repo OWNER/REPO" → CI/CD workflow runs
+Use when the user asks about their GitHub repos, commits, PRs, issues, or wants to open a repo in the browser.`,
+  parameters: {
+    type:       'object',
+    properties: {
+      subcommand: {
+        type:        'string',
+        description: 'The gh subcommand and flags to run, e.g. "repo list --limit 5" or "commit list --repo owner/repo --limit 10".',
+      },
+    },
+    required: ['subcommand'],
+  },
+});
+
 // ─── Exports ──────────────────────────────────────────────────────────────────
 module.exports = {
   readFile,
@@ -726,6 +799,7 @@ module.exports = {
   captureScreen,
   browserNavigate,
   browserAction,
+  githubCli,
   setScreenCaptureRequester,
   setSpeakCallback,
   TOOL_DEFINITIONS,

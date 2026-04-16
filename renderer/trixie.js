@@ -21,6 +21,7 @@ camera.position.z = 4;
 
 // ─── Scene group (micro-rotation drift) ──────────────────────────────────────
 const sceneGroup = new THREE.Group();
+sceneGroup.scale.setScalar(1.7);
 scene.add(sceneGroup);
 
 // ─── Lights ───────────────────────────────────────────────────────────────────
