@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Trixie</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      overflow: hidden;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      position: relative;
+    }
+
+    /* ── Canvas ────────────────────────────────────────────────────────── */
+    #canvas-container {
+      width: 100%;
+      height: 280px;
+      flex-shrink: 0;
+      -webkit-app-region: drag;
+    }
+
+    #canvas-container canvas {
+      display: block;
+      width: 100% !important;
+      height: 100% !important;
+      pointer-events: none;
+    }
+
+    /* ── Close button ──────────────────────────────────────────────────── */
+    #close-btn {
+      position: absolute;
+      top: 8px;
+      right: 10px;
+      font-size: 14px;
+      line-height: 1;
+      color: rgba(255, 255, 255, 0.3);
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 2px 5px;
+      z-index: 10;
+      transition: color 0.2s;
+      -webkit-app-region: no-drag;
+    }
+    #close-btn:hover { color: rgba(255, 255, 255, 0.75); }
+
+    /* ── Info panel ────────────────────────────────────────────────────── */
+    #info-panel {
+      flex: 1;
+      margin: 0 8px 8px;
+      padding: 12px 16px;
+      background: rgba(0, 0, 0, 0.55);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-radius: 16px;
+      border: 1px solid rgba(255, 184, 48, 0.25);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-height: 0;
+    }
+
+    /* Status row */
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    #status-dot {
+      font-size: 9px;
+      line-height: 1;
+      color: rgba(255, 184, 48, 0.35);
+      display: inline-block;
+    }
+
+    .brand-label {
+      color: #FFB830;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+    }
+
+    #status-text {
+      margin-left: auto;
+      color: rgba(255, 184, 48, 0.65);
+      font-size: 10px;
+      letter-spacing: 0.04em;
+    }
+
+    /* Main text */
+    #panel-text {
+      flex: 1;
+      color: #ffffff;
+      font-size: 12px;
+      line-height: 1.5;
+      overflow-y: auto;
+      min-height: 0;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+      scrollbar-width: none;
+    }
+    #panel-text::-webkit-scrollbar { display: none; }
+
+    /* Fade mask at bottom of scroll area */
+    #panel-text-wrap {
+      flex: 1;
+      position: relative;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    #panel-text-wrap::after {
+      content: '';
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 20px;
+      background: linear-gradient(transparent, rgba(0,0,0,0.55));
+      pointer-events: none;
+      border-radius: 0 0 8px 8px;
+    }
+
+    /* Hint row */
+    .hint-row {
+      display: flex;
+      justify-content: flex-end;
+    }
+    .hint-text {
+      font-size: 10px;
+      color: rgba(255, 255, 255, 0.28);
+    }
+
+    /* Chat input */
+    #chat-row {
+      display: flex;
+      gap: 6px;
+      margin-top: 4px;
+    }
+    #chat-input {
+      flex: 1;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 184, 48, 0.3);
+      border-radius: 8px;
+      color: #fff;
+      font-size: 11px;
+      padding: 5px 8px;
+      outline: none;
+      font-family: inherit;
+    }
+    #chat-input::placeholder { color: rgba(255,255,255,0.3); }
+    #chat-input:focus { border-color: rgba(255, 184, 48, 0.7); }
+    #chat-send {
+      background: rgba(255, 184, 48, 0.2);
+      border: 1px solid rgba(255, 184, 48, 0.4);
+      border-radius: 8px;
+      color: #FFB830;
+      font-size: 11px;
+      padding: 5px 10px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    #chat-send:hover { background: rgba(255, 184, 48, 0.35); }
+
+    /* ── Dot state animations ───────────────────────────────────────────── */
+    #status-dot.dot-idle {
+      color: rgba(255, 184, 48, 0.35);
+      animation: none;
+    }
+
+    #status-dot.dot-listening {
+      color: #FFB830;
+      animation: pulse-gold 1s ease-in-out infinite;
+    }
+    @keyframes pulse-gold {
+      0%, 100% { opacity: 1;   transform: scale(1.1); }
+      50%       { opacity: 0.3; transform: scale(0.7); }
+    }
+
+    #status-dot.dot-thinking {
+      color: #FF8C00;
+      animation: spin-amber 0.5s steps(4, end) infinite;
+    }
+    @keyframes spin-amber {
+      0%   { opacity: 1;   transform: rotate(0deg)   scale(1.1); }
+      25%  { opacity: 0.25; transform: rotate(90deg)  scale(0.9); }
+      50%  { opacity: 1;   transform: rotate(180deg) scale(1.1); }
+      75%  { opacity: 0.25; transform: rotate(270deg) scale(0.9); }
+      100% { opacity: 1;   transform: rotate(360deg) scale(1.1); }
+    }
+
+    #status-dot.dot-speaking {
+      color: #00CC66;
+      animation: pulse-green 0.55s ease-in-out infinite;
+    }
+    @keyframes pulse-green {
+      0%, 100% { opacity: 1;    transform: scale(1.2); }
+      50%       { opacity: 0.25; transform: scale(0.7); }
+    }
+
+    #status-dot.dot-error {
+      color: #FF3B30;
+      animation: pulse-red 0.7s ease-in-out infinite;
+    }
+    @keyframes pulse-red {
+      0%, 100% { opacity: 1;    transform: scale(1.2); }
+      50%       { opacity: 0.2; transform: scale(0.7); }
+    }
+  </style>
+</head>
+<body>
+  <div id="canvas-container"></div>
+
+  <button id="close-btn" title="Hide Trixie">×</button>
+
+  <div id="info-panel">
+    <div class="status-row">
+      <span id="status-dot" class="dot-idle">●</span>
+      <span class="brand-label">TRIXIE</span>
+      <span id="status-text">idle</span>
+    </div>
+    <div id="panel-text-wrap">
+      <div id="panel-text"></div>
+    </div>
+    <div id="chat-row">
+      <input id="chat-input" type="text" placeholder="Type a message..." />
+      <button id="chat-send">Send</button>
+    </div>
+    <div class="hint-row">
+      <span class="hint-text">Ctrl+Space to talk · Ctrl+B demo</span>
+    </div>
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "../node_modules/three/build/three.module.js"
+      }
+    }
+  </script>
+  <script type="module" src="trixie.js"></script>
+  <script>
+    // ── Close button ───────────────────────────────────────────────────────
+    document.getElementById('close-btn').addEventListener('click', () => {
+      if (window.trixie) window.trixie.send('toggle-window');
+    });
+
+    // ── Chat input ─────────────────────────────────────────────────────────
+    function submitChat() {
+      const input = document.getElementById('chat-input');
+      const text  = input.value.trim();
+      if (!text || !window.trixie) return;
+      input.value = '';
+      showPanelText(text, 4000);
+      window.trixie.send('chat-message', text);
+    }
+    document.getElementById('chat-send').addEventListener('click', submitChat);
+    document.getElementById('chat-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitChat();
+    });
+
+    // ── State → UI ─────────────────────────────────────────────────────────
+    const DOT_CLASSES = {
+      idle:      'dot-idle',
+      listening: 'dot-listening',
+      thinking:  'dot-thinking',
+      speaking:  'dot-speaking',
+      error:     'dot-error',
+    };
+    const STATUS_LABELS = {
+      idle:      'idle',
+      listening: 'listening...',
+      thinking:  'thinking...',
+      speaking:  'speaking...',
+      error:     'error',
+    };
+
+    const dotEl    = document.getElementById('status-dot');
+    const statusEl = document.getElementById('status-text');
+    const panelEl  = document.getElementById('panel-text');
+
+    // label param lets main process override the status text (e.g. "reading main.js…")
+    function setUIState(state, label) {
+      dotEl.className      = DOT_CLASSES[state] || 'dot-idle';
+      statusEl.textContent = label || STATUS_LABELS[state] || state;
+    }
+
+    // ── Panel text with fade-in/out ─────────────────────────────────────────
+    let panelTimer    = null;
+    let fadeOutTimer  = null;
+
+    function showPanelText(text, duration) {
+      if (panelTimer)   clearTimeout(panelTimer);
+      if (fadeOutTimer) clearTimeout(fadeOutTimer);
+
+      // Fade out, swap content, fade in
+      panelEl.style.opacity = '0';
+      fadeOutTimer = setTimeout(() => {
+        panelEl.textContent = text;
+        panelEl.scrollTop   = 0;
+        panelEl.style.opacity = '1';
+
+        if (duration) {
+          panelTimer = setTimeout(() => {
+            panelEl.style.opacity = '0';
+            panelTimer = setTimeout(() => {
+              panelEl.textContent   = '';
+            }, 200);
+          }, duration);
+        }
+      }, 200);
+    }
+
+    // ── IPC listeners ──────────────────────────────────────────────────────
+    if (window.trixie) {
+      window.trixie.on('state-change', ({ state, label }) => {
+        setUIState(state, label);
+      });
+
+      window.trixie.on('transcript', (text) => {
+        showPanelText(text, 4000);
+      });
+
+      window.trixie.on('agent-response', ({ text }) => {
+        showPanelText(text, 6000);
+      });
+
+      // ── Screen capture (renderer side) ─────────────────────────────────────
+      window.trixie.on('do-capture', async () => {
+        try {
+          const { desktopCapturer } = require('electron');
+          const sources = await desktopCapturer.getSources({
+            types: ['screen'],
+            thumbnailSize: { width: 1280, height: 720 },
+          });
+          const primary = sources[0];
+          if (!primary) {
+            window.trixie.send('capture-result', { error: 'No screen source found' });
+            return;
+          }
+          const dataURL = primary.thumbnail.toDataURL();
+          window.trixie.send('capture-result', { dataURL });
+        } catch (err) {
+          window.trixie.send('capture-result', { error: err.message });
+        }
+      });
+    }
+  </script>
+</body>
+</html>

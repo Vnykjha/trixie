@@ -1,0 +1,544 @@
+// tools.js — Trixie agent tools
+'use strict';
+
+const fs            = require('fs').promises;
+const fsSync        = require('fs');
+const path          = require('path');
+const os            = require('os');
+const { exec }      = require('child_process');
+const fetch         = require('node-fetch');
+const { saveFact, forgetFact: _forgetFact, listFacts } = require('./memory');
+const { clipboard } = require('electron');
+
+// ─── Tool 1: readFile ─────────────────────────────────────────────────────────
+async function readFile(filePath) {
+  try {
+    const content = await fs.readFile(filePath, 'utf8');
+    if (content.length > 8000) {
+      return content.slice(0, 8000) + '\n(truncated)';
+    }
+    return content;
+  } catch (err) {
+    return `Could not read file: ${err.message}`;
+  }
+}
+
+// ─── Tool 2: writeFile ────────────────────────────────────────────────────────
+// Detect Desktop — may be under OneDrive on Windows 11
+function _detectDesktop() {
+  const candidates = [
+    path.join(os.homedir(), 'OneDrive', 'Desktop'),
+    path.join(os.homedir(), 'Desktop'),
+  ];
+  for (const p of candidates) {
+    try { if (fsSync.statSync(p).isDirectory()) return p; } catch (_) {}
+  }
+  return candidates[1]; // fallback
+}
+const DESKTOP_PATH = _detectDesktop();
+const INDEX_PATH   = path.join(DESKTOP_PATH, 'trixie-files.md');
+
+async function _appendToIndex(filePath) {
+  try {
+    const name    = path.basename(filePath);
+    const date    = new Date().toISOString().slice(0, 10);
+    const entry   = `- [${name}](${filePath}) — saved ${date}\n`;
+    const header  = '# Files Trixie Made For You\n\n';
+
+    let existing = '';
+    try { existing = await fs.readFile(INDEX_PATH, 'utf8'); } catch (_) {}
+
+    if (!existing) {
+      await fs.writeFile(INDEX_PATH, header + entry, 'utf8');
+    } else if (!existing.includes(filePath)) {
+      // Avoid duplicate entries for the same path
+      await fs.appendFile(INDEX_PATH, entry, 'utf8');
+    }
+  } catch (_) {
+    // Index update is best-effort; never fail the main write
+  }
+}
+
+async function writeFile(filePath, content) {
+  try {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, content, 'utf8');
+
+    // Auto-index files written to the Desktop (but not the index itself)
+    const abs = path.resolve(filePath);
+    if (abs.startsWith(DESKTOP_PATH) && abs !== INDEX_PATH) {
+      await _appendToIndex(abs);
+    }
+
+    return `File written to ${filePath}`;
+  } catch (err) {
+    return `Could not write file: ${err.message}`;
+  }
+}
+
+// ─── Tool 3: runCode ──────────────────────────────────────────────────────────
+async function runCode(language, code) {
+  const ext = (language === 'python') ? '.py' : '.js';
+  const cmd = (language === 'python') ? 'python' : 'node';
+  const tmpFile = path.join(os.tmpdir(), `trixie_run_${Date.now()}${ext}`);
+
+  try {
+    fsSync.writeFileSync(tmpFile, code, 'utf8');
+
+    const output = await new Promise((resolve) => {
+      const child = exec(
+        `${cmd} "${tmpFile}"`,
+        { timeout: 10000, env: {} },
+        (err, stdout, stderr) => {
+          if (err && err.killed) {
+            resolve('Code execution timed out after 10 seconds');
+            return;
+          }
+          const combined = [stdout, stderr].filter(Boolean).join('\n').trim();
+          resolve(combined || '(no output)');
+        }
+      );
+      // Belt-and-suspenders timeout
+      setTimeout(() => {
+        try { child.kill(); } catch (_) {}
+      }, 10000);
+    });
+
+    const result = output.slice(0, 2000);
+    return output.length > 2000 ? result + '\n(truncated)' : result;
+  } catch (err) {
+    return `Could not run code: ${err.message}`;
+  } finally {
+    try { fsSync.unlinkSync(tmpFile); } catch (_) {}
+  }
+}
+
+// ─── Tool 4: webSearch ────────────────────────────────────────────────────────
+async function webSearch(query) {
+  try {
+    const key = process.env.TAVILY_KEY;
+    if (!key) return 'Search failed: TAVILY_KEY env var not set';
+
+    const res = await fetch('https://api.tavily.com/search', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        api_key:      key,
+        query,
+        max_results:  3,
+        search_depth: 'basic',
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      return `Search failed: HTTP ${res.status} — ${body}`;
+    }
+
+    const data = await res.json();
+    const results = (data.results || []).slice(0, 3);
+    if (!results.length) return 'No results found.';
+
+    return results
+      .map((r, i) => `${i + 1}. ${r.title}: ${r.content || r.snippet || ''}`.trim())
+      .join('\n');
+  } catch (err) {
+    return `Search failed: ${err.message}`;
+  }
+}
+
+// ─── Tool 5: openApp ──────────────────────────────────────────────────────────
+const APP_MAP = {
+  chrome:   'chrome',
+  firefox:  'firefox',
+  notepad:  'notepad',
+  vscode:   'code',
+  code:     'code',
+  explorer: 'explorer',
+  calc:     'calc',
+  terminal: 'wt',
+};
+
+async function openApp(nameOrUrl) {
+  try {
+    if (nameOrUrl.startsWith('http://') || nameOrUrl.startsWith('https://')) {
+      const openPkg = await loadOpen();
+      await openPkg(nameOrUrl);
+      return `Opened ${nameOrUrl}`;
+    }
+
+    // Handle "code filepath" — open a file in VS Code
+    if (nameOrUrl.toLowerCase().startsWith('code ')) {
+      const filePath = nameOrUrl.slice(5).trim().replace(/^"|"$/g, '');
+      await new Promise((resolve, reject) => {
+        exec(`code "${filePath}"`, { shell: true }, (err) => {
+          if (err) reject(err); else resolve();
+        });
+      });
+      return `Opened ${filePath} in VS Code`;
+    }
+
+    const cmd = APP_MAP[nameOrUrl.toLowerCase()] || nameOrUrl;
+    await new Promise((resolve, reject) => {
+      let shellCmd;
+      if (process.platform === 'win32') {
+        shellCmd = `start "" "${cmd}"`;
+      } else if (process.platform === 'darwin') {
+        shellCmd = `open -a "${cmd}"`;
+      } else {
+        shellCmd = `xdg-open "${cmd}"`;
+      }
+      exec(shellCmd, { shell: true }, (err) => {
+        if (err) reject(err); else resolve();
+      });
+    });
+    return `Opened ${nameOrUrl}`;
+  } catch (err) {
+    return `Could not open ${nameOrUrl}: ${err.message}`;
+  }
+}
+
+// 'open' is an ESM-only package; load it via dynamic import
+let _openCache = null;
+async function loadOpen() {
+  if (_openCache) return _openCache;
+  const mod = await import('open');
+  _openCache = mod.default;
+  return _openCache;
+}
+
+// ─── Tool 6: listDirectory ────────────────────────────────────────────────────
+async function listDirectory(dirPath) {
+  const target = dirPath || process.cwd();
+  try {
+    const entries = await fs.readdir(target, { withFileTypes: true });
+    if (!entries.length) return `(empty directory: ${target})`;
+
+    const lines = entries.map((e) => {
+      const type = e.isDirectory() ? 'folder' : 'file';
+      return `  [${type}] ${e.name}`;
+    });
+
+    return `Contents of ${target}:\n${lines.join('\n')}`;
+  } catch (err) {
+    return `Could not list directory: ${err.message}`;
+  }
+}
+
+// ─── Tool definitions (JSON Schema for LLM) ───────────────────────────────────
+const TOOL_DEFINITIONS = [
+  {
+    name:        'readFile',
+    description: 'Read the contents of a file at the given path. Returns up to 8000 characters.',
+    parameters:  {
+      type:       'object',
+      properties: {
+        filePath: { type: 'string', description: 'Absolute or relative path to the file.' },
+      },
+      required: ['filePath'],
+    },
+  },
+  {
+    name:        'writeFile',
+    description: 'Write a string to a file, creating parent directories as needed.',
+    parameters:  {
+      type:       'object',
+      properties: {
+        filePath: { type: 'string', description: 'Destination file path.' },
+        content:  { type: 'string', description: 'Text content to write.' },
+      },
+      required: ['filePath', 'content'],
+    },
+  },
+  {
+    name:        'runCode',
+    description: 'Execute a snippet of Python or JavaScript code and return stdout/stderr (max 2000 chars, 10s timeout).',
+    parameters:  {
+      type:       'object',
+      properties: {
+        language: {
+          type:        'string',
+          enum:        ['python', 'javascript', 'node'],
+          description: 'The programming language to use.',
+        },
+        code: { type: 'string', description: 'The source code to execute.' },
+      },
+      required: ['language', 'code'],
+    },
+  },
+  {
+    name:        'webSearch',
+    description: 'Search the web via Tavily and return the top 3 results with titles and snippets.',
+    parameters:  {
+      type:       'object',
+      properties: {
+        query: { type: 'string', description: 'The search query.' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name:        'openApp',
+    description: 'Open a URL in the default browser, or launch an application by name (works on Windows, macOS, and Linux).',
+    parameters:  {
+      type:       'object',
+      properties: {
+        nameOrUrl: {
+          type:        'string',
+          description: 'A URL (starting with http/https) or an app name (e.g. "notepad", "chrome", "vscode").',
+        },
+      },
+      required: ['nameOrUrl'],
+    },
+  },
+  {
+    name:        'listDirectory',
+    description: 'List files and folders in a directory. Defaults to the current working directory.',
+    parameters:  {
+      type:       'object',
+      properties: {
+        dirPath: {
+          type:        'string',
+          description: 'Path to the directory to list. Omit to use the current working directory.',
+        },
+      },
+      required: [],
+    },
+  },
+];
+
+// ─── Tool 7: rememberFact ─────────────────────────────────────────────────────
+async function rememberFact(key, value) {
+  const slug = saveFact(key, value);
+  return `Remembered: "${value}" (saved as "${slug}")`;
+}
+
+// ─── Tool 8: forgetFact ───────────────────────────────────────────────────────
+async function forgetFact(key) {
+  const removed = _forgetFact(key);
+  return removed ? `Forgot: "${key}"` : `No memory found for "${key}"`;
+}
+
+// ─── Tool 9: recallMemory ─────────────────────────────────────────────────────
+async function recallMemory() {
+  const facts = listFacts();
+  const entries = Object.entries(facts);
+  if (!entries.length) return 'No memories saved yet.';
+  return entries.map(([k, v]) => `${k}: ${v.value}`).join('\n');
+}
+
+// Patch TOOL_DEFINITIONS with new tools
+TOOL_DEFINITIONS.push(
+  {
+    name:        'rememberFact',
+    description: 'Save a fact about the student to persistent memory so Trixie can recall it in future sessions.',
+    parameters:  {
+      type:       'object',
+      properties: {
+        key:   { type: 'string', description: 'Short identifier slug, e.g. "os_exam_date".' },
+        value: { type: 'string', description: 'The fact to remember, e.g. "OS exam is on Thursday".' },
+      },
+      required: ['key', 'value'],
+    },
+  },
+  {
+    name:        'forgetFact',
+    description: 'Remove a previously saved memory fact by its key.',
+    parameters:  {
+      type:       'object',
+      properties: {
+        key: { type: 'string', description: 'The key slug of the fact to forget.' },
+      },
+      required: ['key'],
+    },
+  },
+  {
+    name:        'recallMemory',
+    description: 'List all facts currently saved in the student memory store.',
+    parameters:  { type: 'object', properties: {}, required: [] },
+  },
+);
+
+// ─── Tool 10: readClipboard ───────────────────────────────────────────────────
+async function readClipboard() {
+  try {
+    const text = clipboard.readText();
+    if (!text) return '(clipboard is empty)';
+    return text.length > 4000 ? text.slice(0, 4000) + '\n(truncated)' : text;
+  } catch (err) {
+    return `Could not read clipboard: ${err.message}`;
+  }
+}
+
+// ─── Tool 11: writeClipboard ──────────────────────────────────────────────────
+async function writeClipboard(text) {
+  try {
+    clipboard.writeText(text);
+    return `Copied to clipboard (${text.length} chars)`;
+  } catch (err) {
+    return `Could not write clipboard: ${err.message}`;
+  }
+}
+
+TOOL_DEFINITIONS.push(
+  {
+    name:        'readClipboard',
+    description: 'Read the current text content of the system clipboard. Use this when the student says "explain what I just copied" or "look at my clipboard".',
+    parameters:  { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name:        'writeClipboard',
+    description: 'Write text to the system clipboard so the student can paste it.',
+    parameters:  {
+      type:       'object',
+      properties: {
+        text: { type: 'string', description: 'The text to copy to clipboard.' },
+      },
+      required: ['text'],
+    },
+  },
+);
+
+// ─── Tool 12: setReminder ─────────────────────────────────────────────────────
+// main.js injects the speak callback so tools.js doesn't import voice-out directly.
+let _speakFn = null;
+function setSpeakCallback(fn) { _speakFn = fn; }
+
+async function setReminder(message, delayMinutes) {
+  const ms = Math.max(1, Number(delayMinutes) || 1) * 60 * 1000;
+  setTimeout(async () => {
+    if (_speakFn) {
+      await _speakFn(`Reminder: ${message}`).catch(() => {});
+    } else {
+      console.log(`[REMINDER] ${message}`);
+    }
+  }, ms);
+  const when = delayMinutes === 1 ? 'in 1 minute' : `in ${delayMinutes} minutes`;
+  return `Got it! I'll remind you ${when}: "${message}"`;
+}
+
+TOOL_DEFINITIONS.push({
+  name:        'setReminder',
+  description: 'Set a spoken reminder that fires after a delay. Use when the student says "remind me to X in Y minutes".',
+  parameters:  {
+    type:       'object',
+    properties: {
+      message:      { type: 'string',  description: 'What to remind the student about.' },
+      delayMinutes: { type: 'number',  description: 'How many minutes from now to fire the reminder.' },
+    },
+    required: ['message', 'delayMinutes'],
+  },
+});
+
+// ─── Tool 13: captureScreen ───────────────────────────────────────────────────
+// The actual capture happens in the renderer (desktopCapturer is renderer-only).
+// main.js wires up the callback via setScreenCaptureRequester below.
+let _screenCaptureRequester = null;
+
+function setScreenCaptureRequester(fn) {
+  _screenCaptureRequester = fn;
+}
+
+async function captureScreen(question) {
+  if (!_screenCaptureRequester) {
+    return 'Screen capture not yet initialised — try again in a moment.';
+  }
+  try {
+    const dataURL = await _screenCaptureRequester();
+    // dataURL is a base64 PNG data URL; pass the raw base64 + the question to Gemini vision
+    return JSON.stringify({ type: 'screenshot', dataURL, question: question || 'Describe what is on screen.' });
+  } catch (err) {
+    return `Screen capture failed: ${err.message}`;
+  }
+}
+
+TOOL_DEFINITIONS.push({
+  name:        'captureScreen',
+  description: 'Take a screenshot of the student\'s screen and answer a visual question about it. Use when they say "explain what\'s on my screen", "what does this error say", or "look at my screen".',
+  parameters:  {
+    type:       'object',
+    properties: {
+      question: { type: 'string', description: 'The visual question to answer about the screenshot.' },
+    },
+    required: [],
+  },
+});
+
+// ─── Tool 14: listMyFiles ─────────────────────────────────────────────────────
+async function listMyFiles() {
+  try {
+    const raw = await fs.readFile(INDEX_PATH, 'utf8');
+    const lines = raw
+      .split('\n')
+      .filter((l) => l.startsWith('- ['))
+      .map((l) => {
+        // Extract filename from markdown link: - [name](path) — saved DATE
+        const m = l.match(/^- \[([^\]]+)\]\(([^)]+)\) — saved (.+)$/);
+        return m ? `${m[1]} (saved ${m[3]})` : l;
+      });
+    if (!lines.length) return 'No files saved yet.';
+    return `I've saved these files to your Desktop:\n${lines.join('\n')}`;
+  } catch (_) {
+    return "I haven't saved any files to your Desktop yet.";
+  }
+}
+
+TOOL_DEFINITIONS.push({
+  name:        'listMyFiles',
+  description: "List all files Trixie has previously saved to the student's Desktop. Use when they ask 'what files have you made for me?' or 'show me my cheat sheets'.",
+  parameters:  { type: 'object', properties: {}, required: [] },
+});
+
+// ─── Tool 15: openInVSCode ────────────────────────────────────────────────────
+async function openInVSCode(fileName) {
+  try {
+    // If it's just a filename (no path), look on Desktop first
+    let filePath = fileName;
+    if (!path.isAbsolute(fileName) && !fileName.includes('/') && !fileName.includes('\\')) {
+      filePath = path.join(DESKTOP_PATH, fileName);
+    }
+    await new Promise((resolve, reject) => {
+      exec(`code "${filePath}"`, { shell: true }, (err) => {
+        if (err) reject(err); else resolve();
+      });
+    });
+    return `Opened ${filePath} in VS Code`;
+  } catch (err) {
+    return `Could not open in VS Code: ${err.message}`;
+  }
+}
+
+TOOL_DEFINITIONS.push({
+  name:        'openInVSCode',
+  description: 'Open a file in Visual Studio Code. Use when the student says "open [file] in VS Code" or "open [file] in visual studio". Pass just the filename if it is on the Desktop.',
+  parameters:  {
+    type:       'object',
+    properties: {
+      fileName: { type: 'string', description: 'The filename (e.g. "DFS_in_C.txt") or full path to open in VS Code.' },
+    },
+    required: ['fileName'],
+  },
+});
+
+// ─── Exports ──────────────────────────────────────────────────────────────────
+module.exports = {
+  readFile,
+  writeFile,
+  runCode,
+  webSearch,
+  openApp,
+  openInVSCode,
+  listDirectory,
+  rememberFact,
+  forgetFact,
+  recallMemory,
+  readClipboard,
+  writeClipboard,
+  setReminder,
+  listMyFiles,
+  captureScreen,
+  setScreenCaptureRequester,
+  setSpeakCallback,
+  TOOL_DEFINITIONS,
+  _DESKTOP_PATH: DESKTOP_PATH,
+};

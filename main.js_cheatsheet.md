@@ -1,0 +1,1 @@
+The main.js file is the entry point for the Electron application. It sets up the window position persistence, creates the window, and handles various events such as listening for voice input, processing transcripts, and toggling the window. The file also includes a demo mode that simulates a scripted transcript after a 1-second delay.

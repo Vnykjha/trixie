@@ -1,0 +1,23 @@
+{
+  "name": "trixie",
+  "version": "1.0.0",
+  "description": "Trixie - AI Desktop Assistant",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "setup": "copy .env.example .env && echo .env created — fill in your keys"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^16.0.0",
+    "electron": "^30.0.0",
+    "form-data": "^4.0.5",
+    "mic": "^2.1.2",
+    "node-fetch": "^2.7.0",
+    "open": "^11.0.0",
+    "play-sound": "^1.1.6",
+    "three": "^0.164.0"
+  }
+}
