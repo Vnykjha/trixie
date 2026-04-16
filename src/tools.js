@@ -27,13 +27,14 @@ async function readFile(filePath) {
 // Detect Desktop — may be under OneDrive on Windows 11
 function _detectDesktop() {
   const candidates = [
+    'C:\\Users\\vnykj\\OneDrive\\Desktop',
     path.join(os.homedir(), 'OneDrive', 'Desktop'),
     path.join(os.homedir(), 'Desktop'),
   ];
   for (const p of candidates) {
     try { if (fsSync.statSync(p).isDirectory()) return p; } catch (_) {}
   }
-  return candidates[1]; // fallback
+  return candidates[0]; // fallback to known path
 }
 const DESKTOP_PATH = _detectDesktop();
 const INDEX_PATH   = path.join(DESKTOP_PATH, 'trixie-files.md');
@@ -148,23 +149,93 @@ async function webSearch(query) {
 }
 
 // ─── Tool 5: openApp ──────────────────────────────────────────────────────────
+// UWP/Store apps use Windows URI schemes; traditional apps use their exe name.
 const APP_MAP = {
-  chrome:   'chrome',
-  firefox:  'firefox',
-  notepad:  'notepad',
-  vscode:   'code',
-  code:     'code',
-  explorer: 'explorer',
-  calc:     'calc',
-  terminal: 'wt',
+  // Traditional apps
+  chrome:        'chrome',
+  firefox:       'firefox',
+  notepad:       'notepad',
+  vscode:        'code',
+  code:          'code',
+  explorer:      'explorer',
+  terminal:      'wt',
+  wordpad:       'wordpad',
+  paint:         'mspaint',
+  // UWP apps — opened via Windows URI scheme (start <uri>)
+  camera:        'microsoft.windows.camera:',
+  calculator:    'ms-calculator:',
+  calc:          'ms-calculator:',
+  photos:        'ms-photos:',
+  settings:      'ms-settings:',
+  store:         'ms-windows-store:',
+  maps:          'bingmaps:',
+  mail:          'ms-outlook:',
+  calendar:      'outlookcal:',
+  clock:         'ms-clock:',
+  weather:       'msnweather:',
+  news:          'msn-news:',
+  spotify:       'spotify:',
+  teams:         'msteams:',
+  whatsapp:      'whatsapp:',
+  discord:       'discord:',
+  xbox:          'xbox:',
+  // Snipping tool / screen snip
+  snip:          'ms-screensketch:',
+  'snipping tool': 'ms-screensketch:',
 };
+
+// Common websites — opened in Chrome
+const WEBSITE_MAP = {
+  youtube:    'https://www.youtube.com',
+  gmail:      'https://mail.google.com',
+  google:     'https://www.google.com',
+  github:     'https://www.github.com',
+  stackoverflow: 'https://stackoverflow.com',
+  reddit:     'https://www.reddit.com',
+  twitter:    'https://www.twitter.com',
+  x:          'https://www.x.com',
+  instagram:  'https://www.instagram.com',
+  facebook:   'https://www.facebook.com',
+  linkedin:   'https://www.linkedin.com',
+  whatsapp:   'https://web.whatsapp.com',
+  netflix:    'https://www.netflix.com',
+  amazon:     'https://www.amazon.in',
+  chatgpt:    'https://chat.openai.com',
+  drive:      'https://drive.google.com',
+  docs:       'https://docs.google.com',
+  maps:       'https://maps.google.com',
+  meet:       'https://meet.google.com',
+};
+
+async function _openInChrome(url) {
+  return new Promise((resolve, reject) => {
+    // Try Chrome executable paths common on Windows
+    const chromePaths = [
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+      `C:\\Users\\vnykj\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe`,
+    ];
+    const chromePath = chromePaths.find(p => {
+      try { require('fs').accessSync(p); return true; } catch (_) { return false; }
+    }) || 'chrome';
+    exec(`"${chromePath}" "${url}"`, { shell: true }, (err) => {
+      if (err) reject(err); else resolve();
+    });
+  });
+}
 
 async function openApp(nameOrUrl) {
   try {
+    // Check website map first — open in Chrome
+    const siteUrl = WEBSITE_MAP[nameOrUrl.toLowerCase()];
+    if (siteUrl) {
+      await _openInChrome(siteUrl);
+      return `Opened ${nameOrUrl} in Chrome`;
+    }
+
     if (nameOrUrl.startsWith('http://') || nameOrUrl.startsWith('https://')) {
-      const openPkg = await loadOpen();
-      await openPkg(nameOrUrl);
-      return `Opened ${nameOrUrl}`;
+      await _openInChrome(nameOrUrl);
+      return `Opened ${nameOrUrl} in Chrome`;
     }
 
     // Handle "code filepath" — open a file in VS Code
@@ -279,13 +350,13 @@ const TOOL_DEFINITIONS = [
   },
   {
     name:        'openApp',
-    description: 'Open a URL in the default browser, or launch an application by name (works on Windows, macOS, and Linux).',
+    description: 'Open a website or launch any application. For websites, pass the site name (e.g. "youtube", "gmail", "github", "reddit", "netflix", "chatgpt") — they open in Chrome. For URLs pass the full http/https link. For apps pass the name: camera, calculator, spotify, discord, whatsapp, teams, terminal, notepad, paint, vscode, explorer, and more.',
     parameters:  {
       type:       'object',
       properties: {
         nameOrUrl: {
           type:        'string',
-          description: 'A URL (starting with http/https) or an app name (e.g. "notepad", "chrome", "vscode").',
+          description: 'A URL (starting with http/https) or a common app name (e.g. "camera", "calculator", "spotify", "notepad").',
         },
       },
       required: ['nameOrUrl'],
@@ -520,6 +591,122 @@ TOOL_DEFINITIONS.push({
   },
 });
 
+// ─── Browser (Playwright) ─────────────────────────────────────────────────────
+let _browser = null;
+let _page    = null;
+
+const CHROME_PATHS = [
+  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+  `C:\\Users\\vnykj\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe`,
+];
+
+async function _getBrowser() {
+  if (_browser && _browser.isConnected()) return _browser;
+  const { chromium } = require('playwright-core');
+  const executablePath = CHROME_PATHS.find(p => {
+    try { fsSync.accessSync(p); return true; } catch (_) { return false; }
+  });
+  _browser = await chromium.launch({
+    headless:   false,
+    executablePath,
+    args:       ['--start-maximized'],
+  });
+  _browser.on('disconnected', () => { _browser = null; _page = null; });
+  return _browser;
+}
+
+async function _getPage() {
+  const browser = await _getBrowser();
+  if (!_page || _page.isClosed()) {
+    const ctx = await browser.newContext({ viewport: null });
+    _page = await ctx.newPage();
+  }
+  return _page;
+}
+
+async function browserNavigate(url) {
+  try {
+    // Resolve site names to full URLs
+    const siteUrl = WEBSITE_MAP[url.toLowerCase()] || url;
+    const finalUrl = siteUrl.startsWith('http') ? siteUrl : `https://${siteUrl}`;
+    const page = await _getPage();
+    await page.goto(finalUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    const title = await page.title();
+    return `Opened ${title} (${finalUrl})`;
+  } catch (err) {
+    return `Browser navigate failed: ${err.message}`;
+  }
+}
+
+async function browserAction(action, selector, value) {
+  try {
+    const page = await _getPage();
+    if (action === 'click') {
+      await page.click(selector, { timeout: 8000 });
+      return `Clicked ${selector}`;
+    }
+    if (action === 'type') {
+      await page.fill(selector, value || '', { timeout: 8000 });
+      return `Typed into ${selector}`;
+    }
+    if (action === 'search') {
+      // Smart search: detect current site and use its search URL
+      const currentUrl = page.url();
+      let searchUrl;
+      if (currentUrl.includes('youtube.com')) {
+        searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(value)}`;
+      } else if (currentUrl.includes('github.com')) {
+        searchUrl = `https://github.com/search?q=${encodeURIComponent(value)}`;
+      } else if (currentUrl.includes('reddit.com')) {
+        searchUrl = `https://www.reddit.com/search/?q=${encodeURIComponent(value)}`;
+      } else {
+        searchUrl = `https://www.google.com/search?q=${encodeURIComponent(value)}`;
+      }
+      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      const title = await page.title();
+      return `Searched for "${value}" — page: ${title}`;
+    }
+    if (action === 'read') {
+      const text = await page.innerText('body');
+      return text.slice(0, 3000);
+    }
+    if (action === 'screenshot') {
+      const buf = await page.screenshot({ type: 'png' });
+      return `Screenshot taken (${buf.length} bytes)`;
+    }
+    return `Unknown action: ${action}`;
+  } catch (err) {
+    return `Browser action failed: ${err.message}`;
+  }
+}
+
+TOOL_DEFINITIONS.push({
+  name:        'browserNavigate',
+  description: 'Open a URL or website name in Chrome using Playwright. Use this instead of openApp for any website. Pass a site name like "youtube", "gmail", "github" or a full URL. Always use this when the user wants to open a website.',
+  parameters:  {
+    type:       'object',
+    properties: {
+      url: { type: 'string', description: 'A website name (e.g. "youtube", "gmail") or full URL (e.g. "https://example.com").' },
+    },
+    required: ['url'],
+  },
+});
+
+TOOL_DEFINITIONS.push({
+  name:        'browserAction',
+  description: 'Control the browser: click elements, type text, search Google, or read page content. Use after browserNavigate. Actions: "click" (pass selector), "type" (pass selector + value), "search" (pass value = search query), "read" (returns page text).',
+  parameters:  {
+    type:       'object',
+    properties: {
+      action:   { type: 'string', enum: ['click', 'type', 'search', 'read', 'screenshot'], description: 'What to do in the browser.' },
+      selector: { type: 'string', description: 'CSS selector or text selector for click/type actions. E.g. "input[name=q]" or "text=Sign in".' },
+      value:    { type: 'string', description: 'Text to type, or search query for the "search" action.' },
+    },
+    required: ['action'],
+  },
+});
+
 // ─── Exports ──────────────────────────────────────────────────────────────────
 module.exports = {
   readFile,
@@ -537,6 +724,8 @@ module.exports = {
   setReminder,
   listMyFiles,
   captureScreen,
+  browserNavigate,
+  browserAction,
   setScreenCaptureRequester,
   setSpeakCallback,
   TOOL_DEFINITIONS,

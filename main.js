@@ -96,6 +96,37 @@ async function processWithAgent(transcript) {
   }
 }
 
+// ─── Demo voice mode ──────────────────────────────────────────────────────────
+// When DEMO_VOICE=true, Ctrl+Space fakes listening and injects a hardcoded question.
+const DEMO_QUESTIONS = [
+  'What is BFS?',
+  'Write DFS code in C and save it to my desktop',
+  'Start viva on operating systems',
+  'What is a binary search tree?',
+  'Search for latest trends in artificial intelligence',
+  'Remind me to review notes in 1 minute',
+];
+let _demoIndex    = 0;
+let _demoListening = false;
+
+function triggerListeningDemo() {
+  if (_demoListening) return; // already listening
+  _demoListening = true;
+  voiceOut.stop();
+  sendToRenderer('state-change', { state: 'listening', amplitude: 0 });
+}
+
+function stopListeningDemo() {
+  if (!_demoListening) return;
+  _demoListening = false;
+  const q = DEMO_QUESTIONS[_demoIndex % DEMO_QUESTIONS.length];
+  _demoIndex++;
+  console.log('[DEMO-VOICE] Injecting:', q);
+  sendToRenderer('state-change', { state: 'idle', amplitude: 0 });
+  sendToRenderer('transcript', q);
+  processWithAgent(q);
+}
+
 // ─── Voice event wiring ───────────────────────────────────────────────────────
 function triggerListening() {
   voiceOut.stop();
@@ -176,10 +207,16 @@ app.whenReady().then(async () => {
   startWakeWordDetection();
 
   globalShortcut.register('Control+Space', () => {
-    if (win && win.isVisible()) {
-      triggerListening();
-    } else {
+    if (!win || !win.isVisible()) {
       toggleWindow();
+      return;
+    }
+    if (_demoListening) {
+      // Second press — stop demo listening and inject question
+      stopListeningDemo();
+    } else {
+      // First press — show listening state (no real mic)
+      triggerListeningDemo();
     }
   });
 

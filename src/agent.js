@@ -2,10 +2,12 @@
 'use strict';
 
 const fetch            = require('node-fetch');
+const { BedrockRuntimeClient, ConverseCommand } = require('@aws-sdk/client-bedrock-runtime');
 const toolsModule      = require('./tools');
 const { TOOL_DEFINITIONS, readFile, writeFile, runCode, webSearch, openApp, openInVSCode, listDirectory,
         rememberFact, forgetFact, recallMemory,
-        readClipboard, writeClipboard, setReminder, listMyFiles, captureScreen } = toolsModule;
+        readClipboard, writeClipboard, setReminder, listMyFiles, captureScreen,
+        browserNavigate, browserAction } = toolsModule;
 const DESKTOP_PATH     = toolsModule._DESKTOP_PATH;
 const { formatMemoryForPrompt } = require('./memory');
 const sessionLog = require('./session-log');
@@ -13,7 +15,8 @@ const sessionLog = require('./session-log');
 // ─── Tool executor map ────────────────────────────────────────────────────────
 const TOOLS = { readFile, writeFile, runCode, webSearch, openApp, openInVSCode, listDirectory,
                 rememberFact, forgetFact, recallMemory,
-                readClipboard, writeClipboard, setReminder, listMyFiles, captureScreen };
+                readClipboard, writeClipboard, setReminder, listMyFiles, captureScreen,
+                browserNavigate, browserAction };
 
 // Explicit parameter order per tool — LLM may return args in any key order.
 const TOOL_PARAM_ORDER = {
@@ -30,8 +33,10 @@ const TOOL_PARAM_ORDER = {
   readClipboard: [],
   writeClipboard: ['text'],
   setReminder:   ['message', 'delayMinutes'],
-  listMyFiles:   [],
-  captureScreen: ['question'],
+  listMyFiles:      [],
+  captureScreen:    ['question'],
+  browserNavigate:  ['url'],
+  browserAction:    ['action', 'selector', 'value'],
 };
 
 const MAX_TOOL_LOOPS = 6; // safety cap on chained tool calls per turn
@@ -57,6 +62,9 @@ Key behaviours:
 - "remind me to X in Y minutes": call setReminder.
 - "remember that X": call rememberFact. "forget X": call forgetFact.
 - "what files have you made": call listMyFiles.
+- "open X" / "go to X" / any website: ALWAYS call browserNavigate with the site name (e.g. "youtube", "gmail", "github", "netflix", "reddit", "chatgpt"). It opens Chrome automatically.
+- "search for X on [site]" / "click X" / "type X": use browserAction after browserNavigate.
+- "launch X" / "open [desktop app]": use openApp for non-browser apps (camera, calculator, spotify, discord, etc.). Never just say you opened something — always call the tool first.
 Always be brief. Offer to write long answers to a file.
 
 IMPORTANT: The user's Desktop is at "${DESKTOP_PATH}". Always use this exact path when saving files to the Desktop. Never use ~, C:\\Users\\User, or any other guessed path.
@@ -113,17 +121,35 @@ class Agent {
       if (onStateChange) onStateChange('thinking');
 
       let response;
+      const hasBedrock = process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY;
       const skipGemini = process.env.GEMINI_DISABLED === 'true';
-      try {
-        if (skipGemini) throw new Error('Gemini disabled via GEMINI_DISABLED=true');
-        response = await this._callGemini(onStateChange);
-      } catch (geminiErr) {
-        if (!skipGemini) console.warn('[AGENT] Gemini failed, falling back to Groq:', geminiErr.message);
+
+      if (hasBedrock) {
+        // Bedrock is primary when AWS credentials are present
         try {
-          response = await this._callGroq(onStateChange);
-        } catch (groqErr) {
-          console.error('[AGENT] Groq also failed:', groqErr.message);
-          response = "My thinking is a bit slow right now — try again in a moment.";
+          response = await this._callBedrock(onStateChange);
+        } catch (bedrockErr) {
+          console.warn('[AGENT] Bedrock failed, falling back to Groq:', bedrockErr.message);
+          try {
+            response = await this._callGroq(onStateChange);
+          } catch (groqErr) {
+            console.error('[AGENT] Groq also failed:', groqErr.message);
+            response = "My thinking is a bit slow right now — try again in a moment.";
+          }
+        }
+      } else {
+        // Original Gemini → Groq fallback chain
+        try {
+          if (skipGemini) throw new Error('Gemini disabled');
+          response = await this._callGemini(onStateChange);
+        } catch (geminiErr) {
+          if (!skipGemini) console.warn('[AGENT] Gemini failed, falling back to Groq:', geminiErr.message);
+          try {
+            response = await this._callGroq(onStateChange);
+          } catch (groqErr) {
+            console.error('[AGENT] Groq also failed:', groqErr.message);
+            response = "My thinking is a bit slow right now — try again in a moment.";
+          }
         }
       }
 
@@ -188,6 +214,81 @@ class Agent {
     return parts.join('\n\n');
   }
 
+  // ── Bedrock (Claude 3.5 Haiku) ────────────────────────────────────────────
+
+  async _callBedrock(onStateChange) {
+    const region = process.env.AWS_REGION || 'us-east-1';
+    const client = new BedrockRuntimeClient({
+      region,
+      credentials: {
+        accessKeyId:     process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+      },
+    });
+
+    const modelId = 'us.anthropic.claude-3-haiku-20240307-v1:0';
+
+    // Convert TOOL_DEFINITIONS to Bedrock tool format
+    const bedrockTools = TOOL_DEFINITIONS.map(t => ({
+      toolSpec: {
+        name:        t.name,
+        description: t.description,
+        inputSchema: { json: t.parameters },
+      },
+    }));
+
+    // Convert history to Bedrock message format
+    let messages = this.conversationHistory
+      .filter(m => m.role !== 'system')
+      .map(m => ({
+        role:    m.role === 'assistant' ? 'assistant' : 'user',
+        content: [{ text: m.content }],
+      }));
+
+    for (let i = 0; i < MAX_TOOL_LOOPS; i++) {
+      const cmd = new ConverseCommand({
+        modelId,
+        system:   [{ text: this._buildSystemPrompt() }],
+        messages,
+        toolConfig: { tools: bedrockTools },
+        inferenceConfig: { maxTokens: 800, temperature: 0.7 },
+      });
+
+      const res  = await client.send(cmd);
+      const stop = res.stopReason;
+      const content = res.output?.message?.content || [];
+
+      if (stop === 'tool_use') {
+        const assistantMsg = { role: 'assistant', content };
+        const toolResults  = [];
+
+        for (const block of content) {
+          if (block.toolUse) {
+            const { toolUseId, name, input } = block.toolUse;
+            console.log(`[AGENT] Bedrock tool call: ${name}`, input);
+            if (onStateChange) onStateChange('thinking', this._toolLabel(name, input));
+            const result = await this._executeTool(name, input);
+            toolResults.push({
+              toolResult: {
+                toolUseId,
+                content: [{ text: String(result) }],
+              },
+            });
+          }
+        }
+
+        messages = [...messages, assistantMsg, { role: 'user', content: toolResults }];
+        continue;
+      }
+
+      const text = content.find(b => b.text)?.text?.trim();
+      if (!text) throw new Error('Empty Bedrock response');
+      return text;
+    }
+
+    throw new Error('Bedrock tool loop exceeded max iterations');
+  }
+
   // ── Gemini ─────────────────────────────────────────────────────────────────
 
   async _callGemini(onStateChange) {
@@ -247,9 +348,19 @@ class Agent {
     const key = process.env.GROQ_KEY;
     if (!key) throw new Error('GROQ_KEY not set');
 
+    // Send a reduced tool set to Groq to stay under the 6k TPM free limit.
+    // Tools are grouped: core (always sent) + extras (sent only when keywords match).
+    const lastMsg = this.conversationHistory[this.conversationHistory.length - 1]?.content?.toLowerCase() || '';
+    const needsExtras = /viva|quiz|remind|clipboard|screen|capture|memory|remember|forget|session|cheat sheet|report|my files/i.test(lastMsg);
+    const toolsToSend = needsExtras
+      ? toOpenAITools(TOOL_DEFINITIONS)
+      : toOpenAITools(TOOL_DEFINITIONS.filter(t =>
+          ['readFile','writeFile','runCode','webSearch','openApp','openInVSCode','listDirectory','listMyFiles'].includes(t.name)
+        ));
+
     const baseBody = {
       model:       'llama-3.3-70b-versatile',
-      tools:       toOpenAITools(TOOL_DEFINITIONS),
+      tools:       toolsToSend,
       tool_choice: 'auto',
       max_tokens:  800,
       temperature: 0.7,
@@ -272,13 +383,38 @@ class Agent {
 
       if (!res.ok) {
         const text = await res.text().catch(() => '');
-        // On rate limit, wait the suggested retry delay then try once more
+        // On rate limit, wait the suggested retry delay then retry (doesn't count as a loop iteration)
         if (res.status === 429) {
-          const retryMatch = text.match(/Please try again in ([\d.]+)s/);
-          const waitMs = retryMatch ? Math.ceil(parseFloat(retryMatch[1]) * 1000) + 500 : 5000;
+          const secMatch = text.match(/try again in ([\d.]+)s/);
+          const msMatch  = text.match(/try again in ([\d.]+)ms/);
+          let waitMs = 5000;
+          if (secMatch) waitMs = Math.ceil(parseFloat(secMatch[1]) * 1000) + 500;
+          else if (msMatch) waitMs = Math.ceil(parseFloat(msMatch[1])) + 200;
           console.warn(`[AGENT] Groq 429 — retrying in ${waitMs}ms`);
           await new Promise(r => setTimeout(r, waitMs));
+          i--; // don't count this as a tool loop iteration
           continue;
+        }
+        // On tool_use_failed, try to parse the malformed generation and execute the tool directly
+        if (res.status === 400 && text.includes('tool_use_failed')) {
+          try {
+            const errData = JSON.parse(text);
+            const raw = errData?.error?.failed_generation || '';
+            // Format: <function=toolName{"arg": "val"}> or <function=toolName {"arg": "val"}>
+            const match = raw.match(/<function=(\w+)\s*(\{.*?\})/s);
+            if (match) {
+              const toolName = match[1];
+              const toolArgs = JSON.parse(match[2]);
+              console.warn(`[AGENT] tool_use_failed — manually executing ${toolName}`, toolArgs);
+              if (onStateChange) onStateChange('thinking', this._toolLabel(toolName, toolArgs));
+              const toolResult = await this._executeTool(toolName, toolArgs);
+              messages = [...messages, {
+                role: 'user',
+                content: `Tool ${toolName} returned: ${toolResult}. Now give the user a natural response.`
+              }];
+              continue;
+            }
+          } catch (_) {}
         }
         throw new Error(`Groq ${res.status}: ${text}`);
       }
@@ -352,8 +488,10 @@ class Agent {
         }
       }
 
+      console.log(`[AGENT] Tool result (${name}):`, resultStr.slice(0, 200));
       return resultStr;
     } catch (err) {
+      console.error(`[AGENT] Tool error (${name}):`, err.message);
       return `Tool error: ${err.message}`;
     }
   }
