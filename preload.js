@@ -1,7 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 const ALLOWED_CHANNELS = ['state-change', 'transcript', 'agent-response', 'toggle-window',
-                          'do-capture', 'capture-result',
+                          'do-capture', 'capture-result', 'capture-done',
                           'audio-decode', 'audio-decode-stop', 'audio-amplitude',
                           'chat-message'];
 

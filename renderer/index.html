@@ -342,23 +342,10 @@
       });
 
       // ── Screen capture (renderer side) ─────────────────────────────────────
-      window.trixie.on('do-capture', async () => {
-        try {
-          const { desktopCapturer } = require('electron');
-          const sources = await desktopCapturer.getSources({
-            types: ['screen'],
-            thumbnailSize: { width: 1280, height: 720 },
-          });
-          const primary = sources[0];
-          if (!primary) {
-            window.trixie.send('capture-result', { error: 'No screen source found' });
-            return;
-          }
-          const dataURL = primary.thumbnail.toDataURL();
-          window.trixie.send('capture-result', { dataURL });
-        } catch (err) {
-          window.trixie.send('capture-result', { error: err.message });
-        }
+      // desktopCapturer is not available in the renderer (nodeIntegration: false).
+      // main.js performs the capture and sends the result back via 'capture-done'.
+      window.trixie.on('capture-done', (payload) => {
+        window.trixie.send('capture-result', payload);
       });
     }
   </script>

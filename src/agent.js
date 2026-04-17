@@ -4,7 +4,7 @@
 const fetch            = require('node-fetch');
 const { BedrockRuntimeClient, ConverseCommand } = require('@aws-sdk/client-bedrock-runtime');
 const toolsModule      = require('./tools');
-const { TOOL_DEFINITIONS, readFile, writeFile, runCode, webSearch, openApp, openInVSCode, listDirectory,
+const { TOOL_DEFINITIONS, readFile, writeFile, runCode, webSearch, openApp, closeApp, openInVSCode, listDirectory,
         rememberFact, forgetFact, recallMemory,
         readClipboard, writeClipboard, setReminder, listMyFiles, captureScreen,
         browserNavigate, browserAction, githubCli } = toolsModule;
@@ -13,7 +13,7 @@ const { formatMemoryForPrompt } = require('./memory');
 const sessionLog = require('./session-log');
 
 // ─── Tool executor map ────────────────────────────────────────────────────────
-const TOOLS = { readFile, writeFile, runCode, webSearch, openApp, openInVSCode, listDirectory,
+const TOOLS = { readFile, writeFile, runCode, webSearch, openApp, closeApp, openInVSCode, listDirectory,
                 rememberFact, forgetFact, recallMemory,
                 readClipboard, writeClipboard, setReminder, listMyFiles, captureScreen,
                 browserNavigate, browserAction, githubCli };
@@ -25,6 +25,7 @@ const TOOL_PARAM_ORDER = {
   runCode:       ['language', 'code'],
   webSearch:     ['query'],
   openApp:       ['nameOrUrl'],
+  closeApp:      ['name'],
   openInVSCode:  ['fileName'],
   listDirectory: ['dirPath'],
   rememberFact:  ['key', 'value'],
@@ -52,7 +53,7 @@ const MAX_HISTORY  = 4;
 // ─── System prompt ────────────────────────────────────────────────────────────
 const BASE_SYSTEM_PROMPT = `You are Trixie, a witty AI assistant on a student's Windows desktop.
 Speak concisely — no markdown, no bullet points, natural sentences only.
-You have tools: readFile, writeFile, runCode, webSearch, openApp, listDirectory, captureScreen, readClipboard, writeClipboard, setReminder, rememberFact, forgetFact, recallMemory, listMyFiles, browserNavigate, browserAction, githubCli.
+You have tools: readFile, writeFile, runCode, webSearch, openApp, closeApp, listDirectory, captureScreen, readClipboard, writeClipboard, setReminder, rememberFact, forgetFact, recallMemory, listMyFiles, browserNavigate, browserAction, githubCli.
 
 CRITICAL RULE — TOOL-FIRST: For ANY request that involves an action (opening, launching, searching, writing, reading, navigating, clicking), you MUST call the appropriate tool BEFORE generating a text response. It is strictly forbidden to claim you have done something without first calling the tool. If you say "I've opened X" or "I've saved X" without having called a tool in this turn, that is a hallucination and an error.
 
@@ -67,6 +68,7 @@ Key behaviours:
 - "what files have you made": CALL listMyFiles.
 - "open X" / "go to X" / any website: CALL browserNavigate with the site name (e.g. "youtube", "gmail", "github", "netflix", "reddit", "chatgpt").
 - "search for X on [site]" / "click X" / "type X": CALL browserAction after browserNavigate.
+- "close X" / "quit X" / "kill X": CALL closeApp immediately with the app name. Never say you cannot close apps.
 - "open camera" / "open calculator" / "launch [app]" / any desktop app: CALL openApp immediately. Camera → openApp("camera"). Calculator → openApp("calculator"). Spotify → openApp("spotify"). Discord → openApp("discord"). Do not say you opened it — call the tool first, then confirm.
 - GitHub questions ("my repos", "latest repo", "what did I commit", "open my repo", "my PRs", "my issues", "did CI pass"): CALL githubCli. Examples: "repo list --limit 5", "commit list --repo OWNER/REPO --limit 10", "browse --repo OWNER/REPO". If the user doesn't specify a repo, call "repo list --limit 5" first to find it.
 Always be brief. Offer to write long answers to a file.

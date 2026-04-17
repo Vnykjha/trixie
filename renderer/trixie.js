@@ -43,14 +43,28 @@ const LIGHT_LISTENING  = new THREE.Color(0xffaa00);
 const LIGHT_THINKING   = new THREE.Color(0xffaa00);
 const LIGHT_SPEAKING   = new THREE.Color(0xff9944);
 
+// ─── Outer Atmospheric Halo ───────────────────────────────────────────────────
+// Large back-face sphere with additive blending — creates a soft halo bloom
+const haloMat = new THREE.MeshBasicMaterial({
+  color:       0xff5500,
+  transparent: true,
+  opacity:     0.10,
+  side:        THREE.BackSide,
+  blending:    THREE.AdditiveBlending,
+  depthWrite:  false,
+});
+const haloMesh = new THREE.Mesh(new THREE.SphereGeometry(0.62, 32, 32), haloMat);
+sceneGroup.add(haloMesh);
+
 // ─── Inner Glow Sphere ────────────────────────────────────────────────────────
-// Rendered behind the core; 1.4× larger, very faint warm red
 const glowMat = new THREE.MeshBasicMaterial({
   color:       0xff4400,
   transparent: true,
-  opacity:     0.15,
+  opacity:     0.22,
+  blending:    THREE.AdditiveBlending,
+  depthWrite:  false,
 });
-const glowMesh = new THREE.Mesh(new THREE.SphereGeometry(0.35, 32, 32), glowMat);
+const glowMesh = new THREE.Mesh(new THREE.SphereGeometry(0.44, 32, 32), glowMat);
 sceneGroup.add(glowMesh);
 
 // ─── Core Sphere ──────────────────────────────────────────────────────────────
@@ -61,10 +75,24 @@ const coreMat = new THREE.MeshStandardMaterial({
   roughness:         0.2,
   metalness:         0.1,
 });
-const coreMesh = new THREE.Mesh(new THREE.SphereGeometry(0.25, 32, 32), coreMat);
+const coreMesh = new THREE.Mesh(new THREE.SphereGeometry(0.29, 32, 32), coreMat);
 sceneGroup.add(coreMesh);
 
 // ─── Equatorial Ring ──────────────────────────────────────────────────────────
+// Glow backing ring (thicker, additive) rendered before the sharp ring
+const equatorialGlowRingMat = new THREE.MeshBasicMaterial({
+  color:       0xff8800,
+  transparent: true,
+  opacity:     0.28,
+  blending:    THREE.AdditiveBlending,
+  depthWrite:  false,
+});
+const equatorialGlowRing = new THREE.Mesh(
+  new THREE.TorusGeometry(0.27, 0.032, 8, 64),
+  equatorialGlowRingMat
+);
+sceneGroup.add(equatorialGlowRing);
+
 const equatorialRingMat = new THREE.MeshBasicMaterial({
   color:       0xff7700,
   transparent: true,
@@ -100,11 +128,13 @@ const orbitStreams = orbitStreamDefs.map(d => {
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
 
   const mat = new THREE.PointsMaterial({
-    color:           0xff7700,
-    size:            0.045,
+    color:           0xff8822,
+    size:            0.055,
     sizeAttenuation: true,
     transparent:     true,
     opacity:         d.baseOpacity,
+    blending:        THREE.AdditiveBlending,
+    depthWrite:      false,
   });
 
   const pts   = new THREE.Points(geo, mat);
@@ -306,7 +336,9 @@ function animate() {
   coreMat.color.copy(lerpCoreColor);
   coreMat.emissive.copy(lerpCoreColor);
   glowMat.color.copy(lerpCoreColor);
+  haloMat.color.copy(lerpCoreColor);
   equatorialRingMat.color.copy(lerpCoreColor);
+  equatorialGlowRingMat.color.copy(lerpCoreColor);
   coreLight.color.copy(lerpLightColor);
 
   // ── Core scale: slow idle breath or speaking pulse ────────────────────────
@@ -318,6 +350,7 @@ function animate() {
   }
   coreMesh.scale.setScalar(targetScale);
   glowMesh.scale.setScalar(targetScale);
+  haloMesh.scale.setScalar(targetScale);
 
   // ── Emissive intensity ────────────────────────────────────────────────────
   coreMat.emissiveIntensity = isSpeaking ? 1.2 + amplitude * 1.5
@@ -328,7 +361,9 @@ function animate() {
   coreLight.intensity = 1.2 + (isSpeaking ? amplitude * 1.5 : 0.2 * Math.sin(t * 1.5));
 
   // ── Equatorial ring — faster when thinking, slower at idle ───────────────
-  equatorialRing.rotation.y += isThinking ? 0.03 : (isSpeaking ? 0.02 : 0.01);
+  const ringDelta = isThinking ? 0.03 : (isSpeaking ? 0.02 : 0.01);
+  equatorialRing.rotation.y      += ringDelta;
+  equatorialGlowRing.rotation.y  += ringDelta;
 
   // ── Orbit particle streams ────────────────────────────────────────────────
   updateOrbitStreams(t);

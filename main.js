@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { app, BrowserWindow, globalShortcut, screen, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, globalShortcut, screen, ipcMain, dialog, desktopCapturer } = require('electron');
 const path = require('path');
 const fs   = require('fs');
 const { voiceInput, startWakeWordDetection } = require('./src/voice-in');
@@ -279,23 +279,17 @@ app.whenReady().then(async () => {
   });
 
   // ── Screen capture bridge ───────────────────────────────────────────────────
-  // Tools run in the main process but desktopCapturer only works in renderer.
-  // We give tools.js a callback that sends 'do-capture' to the renderer and
-  // waits (with a 10s timeout) for the 'capture-result' reply.
-  setScreenCaptureRequester(() => new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Screen capture timed out')), 10000);
-
-    ipcMain.once('capture-result', (_event, payload) => {
-      clearTimeout(timer);
-      if (payload.error) {
-        reject(new Error(payload.error));
-      } else {
-        resolve(payload.dataURL);
-      }
+  // desktopCapturer works in the main process in modern Electron.
+  // We capture here and forward the data URL to the renderer for display if needed.
+  setScreenCaptureRequester(async () => {
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: 1280, height: 720 },
     });
-
-    sendToRenderer('do-capture', {});
-  }));
+    const primary = sources[0];
+    if (!primary) throw new Error('No screen source found');
+    return primary.thumbnail.toDataURL();
+  });
 });
 
 app.on('will-quit', () => {

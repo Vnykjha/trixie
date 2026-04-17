@@ -278,6 +278,53 @@ async function loadOpen() {
   return _openCache;
 }
 
+// ─── Tool 5b: closeApp ───────────────────────────────────────────────────────
+const APP_PROCESS_MAP = {
+  spotify:     'Spotify.exe',
+  chrome:      'chrome.exe',
+  firefox:     'firefox.exe',
+  notepad:     'notepad.exe',
+  vscode:      'Code.exe',
+  code:        'Code.exe',
+  explorer:    'explorer.exe',
+  terminal:    'WindowsTerminal.exe',
+  paint:       'mspaint.exe',
+  wordpad:     'wordpad.exe',
+  camera:      'WindowsCamera.exe',
+  calculator:  'CalculatorApp.exe',
+  calc:        'CalculatorApp.exe',
+  teams:       'Teams.exe',
+  discord:     'Discord.exe',
+  whatsapp:    'WhatsApp.exe',
+  xbox:        'XboxApp.exe',
+};
+
+async function closeApp(name) {
+  try {
+    const proc = APP_PROCESS_MAP[name.toLowerCase()] || name;
+    await new Promise((resolve, reject) => {
+      exec(`taskkill /IM "${proc}" /F`, { shell: true }, (err, stdout, stderr) => {
+        if (err) {
+          // Try the raw name as-is if the mapped name failed
+          if (proc !== name) {
+            exec(`taskkill /IM "${name}" /F`, { shell: true }, (err2) => {
+              if (err2) reject(new Error(`No process found for "${name}"`));
+              else resolve();
+            });
+          } else {
+            reject(new Error(`No process found for "${name}"`));
+          }
+        } else {
+          resolve();
+        }
+      });
+    });
+    return `Closed ${name}`;
+  } catch (err) {
+    return `Could not close ${name}: ${err.message}`;
+  }
+}
+
 // ─── Tool 6: listDirectory ────────────────────────────────────────────────────
 async function listDirectory(dirPath) {
   const target = dirPath || process.cwd();
@@ -360,6 +407,17 @@ const TOOL_DEFINITIONS = [
         },
       },
       required: ['nameOrUrl'],
+    },
+  },
+  {
+    name:        'closeApp',
+    description: 'Close / kill a running application by name. Use when the student says "close X", "quit X", or "kill X". Pass the app name (e.g. "spotify", "chrome", "notepad", "discord").',
+    parameters:  {
+      type:       'object',
+      properties: {
+        name: { type: 'string', description: 'The application name to close, e.g. "spotify", "chrome", "notepad".' },
+      },
+      required: ['name'],
     },
   },
   {
@@ -787,6 +845,7 @@ module.exports = {
   runCode,
   webSearch,
   openApp,
+  closeApp,
   openInVSCode,
   listDirectory,
   rememberFact,
